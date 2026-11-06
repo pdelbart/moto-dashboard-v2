@@ -147,7 +147,7 @@ class MainActivity : AppCompatActivity() {
     // ----- localisation -----
     private val locListener = object : LocationListener {
         override fun onLocationChanged(location: Location) {
-            onLocation(location)
+            acceptLocation(location)
         }
 
         override fun onProviderEnabled(provider: String) {}
@@ -349,24 +349,53 @@ class MainActivity : AppCompatActivity() {
     @SuppressLint("MissingPermission")
     private fun startLocation() {
         if (locationStarted) return
+        val lm = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        var ok = false
         try {
-            val lm = getSystemService(Context.LOCATION_SERVICE) as LocationManager
             lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, locListener)
-            locationStarted = true
-            val last = lm.getLastKnownLocation(LocationManager.GPS_PROVIDER)
-            if (last != null) onLocation(last)
-        } catch (e: SecurityException) {
-            gpsView.text = "Position refusée"
+            ok = true
         } catch (e: Exception) {
-            gpsView.text = "GPS indisponible"
         }
+        // La position réseau aide à l'intérieur ou avant le premier signal GPS.
+        try {
+            if (lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
+                lm.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 2000L, 0f, locListener)
+                ok = true
+            }
+        } catch (e: Exception) {
+        }
+        if (!ok) {
+            gpsView.text = "GPS indisponible"
+            return
+        }
+        locationStarted = true
+        // Une ancienne position mémorisée peut dater d'hier : on ne garde que les fixes récents.
+        for (prov in listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)) {
+            val k = try {
+                lm.getLastKnownLocation(prov)
+            } catch (e: Exception) {
+                null
+            }
+            if (k != null && ageSec(k) < 30) acceptLocation(k)
+        }
+    }
+
+    private fun ageSec(l: Location): Long =
+        (SystemClock.elapsedRealtimeNanos() - l.elapsedRealtimeNanos) / 1_000_000_000L
+
+    /** Garde la meilleure position : une position réseau ne remplace pas un fix GPS récent et plus précis. */
+    private fun acceptLocation(l: Location) {
+        val cur = lastLoc
+        if (cur != null && l.provider != cur.provider && ageSec(cur) < 10 && cur.accuracy <= l.accuracy) return
+        onLocation(l)
     }
 
     private fun onLocation(l: Location) {
         lastLoc = l
         val kmh = if (l.hasSpeed()) l.speed * 3.6f else 0f
         speedView.text = (if (kmh < 2f) 0 else Math.round(kmh)).toString()
-        gpsView.text = "GPS ±" + Math.round(l.accuracy) + " m"
+        val src = if (l.provider == LocationManager.GPS_PROVIDER) "GPS" else "Réseau"
+        gpsView.text = src + " ±" + Math.round(l.accuracy) + " m"
 
         val gp = GeoPoint(l.latitude, l.longitude)
         meMarker?.position = gp
@@ -451,6 +480,10 @@ class MainActivity : AppCompatActivity() {
         val me = lastLoc
         if (me == null) {
             toast("Position GPS pas encore trouvée. Réessaie dans quelques secondes.")
+            return
+        }
+        if (me.accuracy > 100f) {
+            toast("Signal GPS trop faible (±" + Math.round(me.accuracy) + " m). Attends le signal GPS ou sors à l'extérieur.")
             return
         }
         if (routing) return
